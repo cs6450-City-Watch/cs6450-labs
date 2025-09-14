@@ -29,7 +29,8 @@ func Dial(addr string) *Client {
 	return &Client{rpcClient}
 }
 
-func generateRequestID() int64 {
+// Todo: change ID generation logic for serializability
+func generateTransactionID() int64 {
 	var bytes [8]byte
 	_, err := rand.Read(bytes[:])
 	if err != nil {
@@ -38,20 +39,28 @@ func generateRequestID() int64 {
 	return int64(binary.LittleEndian.Uint64(bytes[:]))
 }
 
-// Sends a batch of RPC calls synchronously with retry logic
-func (client *Client) Send_Synch_Batch(putData []kvs.BatchOperation) []string {
-	requestID := generateRequestID()
-	request := kvs.Batch_Request{
-		RequestID: requestID,
-		Data:      putData,
+func (client *Client) Commit() {
+	// TODO
+}
+
+func (client *Client) Abort() {
+	// TODO
+}
+
+// Sends a transaction of 3 RPC calls synchronously with retry logic
+func (client *Client) Begin(putData [3]kvs.Operation) []string {
+	requestID := generateTransactionID()
+	request := kvs.Transaction_Request{
+		TransactionID: requestID,
+		Data:          putData,
 	}
 
 	const maxRetries = 3
 	const baseDelay = 100 * time.Millisecond
 
 	for attempt := range maxRetries {
-		response := kvs.Batch_Response{}
-		err := client.rpcClient.Call("KVService.Process_Batch", &request, &response)
+		response := kvs.Transaction_Response{}
+		err := client.rpcClient.Call("KVService.Process_Transaction", &request, &response)
 		if err == nil {
 			return response.Values
 		}
@@ -85,44 +94,43 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 	}
 
 	value := strings.Repeat("x", 128)
-	const batchSize = 5000 //1024
 	clientOpsCompleted := uint64(0)
 
 	for !done.Load() {
-		// Create batches for each server
-		requests := make([][]kvs.BatchOperation, len(hosts))
+		// Create transactions for each server
+		requests := make([][kvs.Transaction_size]kvs.Operation, len(hosts))
 
 		// organize work from workload
-		for j := 0; j < batchSize; j++ {
+		for j := 0; j < kvs.Transaction_size; j++ {
 			// XXX: something may go awry here when the total number of "yields"
-			// from workload.Next() is not a clean multiple of batchSize.
+			// from workload.Next() is not a clean multiple of transaction_size.
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 
 			// Hash key to determine which server
 			serverIndex := int(hashKey(key)) % len(hosts)
-			batchRequestData := requests[serverIndex]
-			var batchOp kvs.BatchOperation
+			transactionRequestData := requests[serverIndex]
+			var trOp kvs.Operation
 
 			if op.IsRead {
-				batchOp.Key = key
-				batchOp.Value = ""
-				batchOp.IsRead = true
+				trOp.Key = key
+				trOp.Value = ""
+				trOp.IsRead = true
 			} else {
-				batchOp.Key = key
-				batchOp.Value = value
-				batchOp.IsRead = false
+				trOp.Key = key
+				trOp.Value = value
+				trOp.IsRead = false
 			}
-			batchRequestData = append(batchRequestData, batchOp)
-			requests[serverIndex] = batchRequestData
+			transactionRequestData[j] = trOp
+			requests[serverIndex] = transactionRequestData
 			clientOpsCompleted++
 		}
 
-		// Send batches to each server
+		// Send transactions to each server
 		for i := 0; i < len(hosts); i++ {
-			batchRequestData := requests[i]
-			if len(batchRequestData) > 0 {
-				clients[i].Send_Synch_Batch(batchRequestData)
+			transactionRequestData := requests[i]
+			if len(transactionRequestData) > 0 {
+				clients[i].Begin(transactionRequestData)
 			}
 		}
 	}

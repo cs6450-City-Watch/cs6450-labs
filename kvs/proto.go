@@ -1,15 +1,17 @@
 package kvs
 
-type Batch_Request struct {
-	RequestID int64
-	Data      []BatchOperation
+const Transaction_size = 3
+
+type Transaction_Request struct {
+	TransactionID int64
+	Data          [Transaction_size]Operation
 }
 
-type Batch_Response struct {
+type Transaction_Response struct {
 	Values []string
 }
 
-type BatchOperation struct {
+type Operation struct {
 	Key    string
 	Value  string
 	IsRead bool

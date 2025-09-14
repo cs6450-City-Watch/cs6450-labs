@@ -42,7 +42,7 @@ type Shard struct {
 }
 
 type RequestCache struct {
-	response  *kvs.Batch_Response
+	response  *kvs.Transaction_Response
 	timestamp time.Time
 }
 
@@ -116,12 +116,20 @@ func (kv *KVService) Put(key, value string, ttl time.Duration) {
 	shard.data[key] = KeyValue{Value: value, Expiration: expiration}
 }
 
-// Accepts a batch of requests for Put/Get operations. Returns responses for both operations
-func (kv *KVService) Process_Batch(request *kvs.Batch_Request, response *kvs.Batch_Response) error {
+func (kv *KVService) Commit(TransactionID int64) {
+	// TODO
+}
+
+func (kv *KVService) Abort(TransactionID int64) {
+	// TODO
+}
+
+// Accepts a transaction of 3 Put/Get operations. Returns responses for both operations
+func (kv *KVService) Process_Transaction(request *kvs.Transaction_Request, response *kvs.Transaction_Response) error {
 	// Check this request ID in the cache
-	if request.RequestID != 0 {
+	if request.TransactionID != 0 {
 		kv.cacheMtx.RLock()
-		cachedResponse, exists := kv.reqCache[request.RequestID]
+		cachedResponse, exists := kv.reqCache[request.TransactionID]
 		kv.cacheMtx.RUnlock()
 
 		if exists {
@@ -130,9 +138,9 @@ func (kv *KVService) Process_Batch(request *kvs.Batch_Request, response *kvs.Bat
 		}
 	}
 
-	kv.stats.puts += uint64(len(request.Data))
+	kv.stats.puts += uint64(kvs.Transaction_size)
 
-	response.Values = make([]string, len(request.Data))
+	response.Values = make([]string, kvs.Transaction_size)
 
 	var i = 0
 	for _, operation := range request.Data {
@@ -148,13 +156,13 @@ func (kv *KVService) Process_Batch(request *kvs.Batch_Request, response *kvs.Bat
 	}
 
 	// Cache the response
-	if request.RequestID != 0 {
+	if request.TransactionID != 0 {
 		kv.cacheMtx.Lock()
-		kv.reqCache[request.RequestID] = &RequestCache{
-			response:  &kvs.Batch_Response{Values: make([]string, len(response.Values))},
+		kv.reqCache[request.TransactionID] = &RequestCache{
+			response:  &kvs.Transaction_Response{Values: make([]string, kvs.Transaction_size)},
 			timestamp: time.Now(),
 		}
-		copy(kv.reqCache[request.RequestID].response.Values, response.Values)
+		copy(kv.reqCache[request.TransactionID].response.Values, response.Values)
 		kv.cacheMtx.Unlock()
 	}
 
