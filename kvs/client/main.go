@@ -18,6 +18,7 @@ import (
 
 type Client struct {
 	transactionID uint64
+	writeSet      map[string]string // TODO: Currently unusued. Read canvas for hints
 	hosts         []*rpc.Client
 }
 
@@ -40,11 +41,11 @@ func generateTransactionID() int64 {
 	return int64(binary.LittleEndian.Uint64(bytes[:]))
 }
 
-func (client *Client) Commit() {
+func (client *Client) Commit(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
 	// TODO
 }
 
-func (client *Client) Abort() {
+func (client *Client) Abort(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
 	// TODO
 }
 
@@ -57,37 +58,40 @@ func (client *Client) Begin() int64 {
 }
 
 // Sends an operation that is a part of a transaction with retry logic
-func (client *Client) Execute(op kvs.Operation, destination int, transactionID int64) string {
-
-	request := kvs.Operation_Request{
-		TransactionID: transactionID,
-		Op:            op,
-	}
-
-	const maxRetries = 3
-	const baseDelay = 100 * time.Millisecond
-
-	for attempt := range maxRetries {
-		// TODO: Right now a client always sends messages to the same host!!!
-		target_server := client.hosts[destination]
-		response := kvs.Operation_Response{}
-		err := target_server.Call("KVService.Process_Operation", &request, &response)
-		if err == nil {
-			return response.Value
+func (client *Client) Prepare(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) string {
+	for i := 0; i < kvs.Transaction_size; i++ {
+		op := operations[i]
+		request := kvs.Operation_Request{
+			TransactionID: transactionID,
+			Op:            op,
 		}
 
-		// Log retry attempt
-		if attempt < maxRetries-1 {
-			delay := baseDelay * time.Duration(1<<attempt) // delay *= 2
-			log.Printf("RPC call failed (attempt %d/%d): %v, retrying in %v", attempt+1, maxRetries, err, delay)
-			time.Sleep(delay)
-		} else {
-			log.Fatal("RPC call failed after all retries:", err)
-		}
-	}
+		const maxRetries = 3
+		const baseDelay = 100 * time.Millisecond
 
-	// TODO
-	return "nil" // unreachable
+		for attempt := range maxRetries {
+			// TODO: Right now a client always sends messages to the same host!!!
+			target_server := client.hosts[destinations[i]]
+			response := kvs.Operation_Response{}
+			err := target_server.Call("KVService.Process_Operation", &request, &response)
+			if err == nil {
+				return response.Value
+			}
+
+			// Log retry attempt
+			if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(1<<attempt) // delay *= 2
+				log.Printf("RPC call failed (attempt %d/%d): %v, retrying in %v", attempt+1, maxRetries, err, delay)
+				time.Sleep(delay)
+			} else {
+				log.Fatal("RPC call failed after all retries:", err)
+			}
+		}
+
+		// TODO
+		return "nil" // unreachable
+	}
+	return "success?" // TODO
 }
 
 func hashKey(key string) uint32 {
@@ -124,7 +128,7 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 
-			// Hash key to determine which server. TODO: hash on TransactionID?
+			// Hash key to determine which server.
 			serverIndex := int(hashKey(key)) % len(hosts)
 
 			var trOp kvs.Operation
@@ -143,11 +147,16 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 			clientOpsCompleted++
 		}
 
-		// Send transactions to each server
-		for i := 0; i < len(hosts); i++ {
-			destination := destinations[i]
+		// Execute transaction without commmit
+		if len(requests) > 0 {
+			client.Prepare(requests, destinations, transactionID)
+		}
+
+		// Commit/Abort logic
+		if 1 == 1 {
+			// Commit transaction
 			if len(requests) > 0 {
-				client.Execute(requests[i], destination, transactionID)
+				client.Commit(requests, destinations, transactionID)
 			}
 		}
 	}
