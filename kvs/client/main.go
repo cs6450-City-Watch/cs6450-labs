@@ -17,6 +17,7 @@ import (
 )
 
 type Client struct {
+	clientID      uint
 	transactionID uint64
 	writeSet      map[string]string // TODO: Currently unusued. Read canvas for hints
 	hosts         []*rpc.Client
@@ -31,8 +32,8 @@ func Dial(addr string) *rpc.Client {
 	return rpcClient
 }
 
-// Todo: change ID generation logic for serializability
-func generateTransactionID() int64 {
+// Todo: Embed clientID into a transactionID
+func generateTransactionID(clientID uint) int64 {
 	var bytes [8]byte
 	_, err := rand.Read(bytes[:])
 	if err != nil {
@@ -50,7 +51,7 @@ func (client *Client) Abort(operations [kvs.Transaction_size]kvs.Operation, dest
 }
 
 func (client *Client) Begin() int64 {
-	transactionID := generateTransactionID()
+	transactionID := generateTransactionID(client.clientID)
 
 	// TODO: Other logic that has to be in Begin()
 
@@ -105,6 +106,8 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 
 	// First, build a client.
 	client := Client{}
+	// TODO: Generate client ID
+
 	participants := make([]*rpc.Client, len(hosts))
 	for i, host := range hosts {
 		participants[i] = Dial(host) // Fix: use participants, not clients
