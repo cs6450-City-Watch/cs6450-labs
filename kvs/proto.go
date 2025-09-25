@@ -2,13 +2,13 @@ package kvs
 
 const Transaction_size = 3
 
-type Transaction_Request struct {
+type Operation_Request struct {
 	TransactionID int64
-	Data          [Transaction_size]Operation
+	Op            Operation
 }
 
-type Transaction_Response struct {
-	Values []string
+type Operation_Response struct {
+	Value string
 }
 
 type Operation struct {

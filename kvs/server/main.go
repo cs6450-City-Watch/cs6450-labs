@@ -42,7 +42,7 @@ type Shard struct {
 }
 
 type RequestCache struct {
-	response  *kvs.Transaction_Response
+	response  *kvs.Operation_Response
 	timestamp time.Time
 }
 
@@ -124,8 +124,8 @@ func (kv *KVService) Abort(TransactionID int64) {
 	// TODO
 }
 
-// Accepts a transaction of 3 Put/Get operations. Returns responses for both operations
-func (kv *KVService) Process_Transaction(request *kvs.Transaction_Request, response *kvs.Transaction_Response) error {
+// Accepts a single Put/Get operation. Returns a response
+func (kv *KVService) Process_Operation(request *kvs.Operation_Request, response *kvs.Operation_Response) error {
 	// Check this request ID in the cache
 	if request.TransactionID != 0 {
 		kv.cacheMtx.RLock()
@@ -140,29 +140,25 @@ func (kv *KVService) Process_Transaction(request *kvs.Transaction_Request, respo
 
 	kv.stats.puts += uint64(kvs.Transaction_size)
 
-	response.Values = make([]string, kvs.Transaction_size)
+	operation := request.Op
 
-	var i = 0
-	for _, operation := range request.Data {
-		if operation.IsRead {
-			if value, found := kv.Get(operation.Key); found {
-				response.Values[i] = value
-			}
-
-		} else {
-			kv.Put(operation.Key, operation.Value, time.Duration(100*float64(time.Millisecond)))
+	if operation.IsRead {
+		if value, found := kv.Get(operation.Key); found {
+			response.Value = value
 		}
-		i++
+
+	} else {
+		kv.Put(operation.Key, operation.Value, time.Duration(100*float64(time.Millisecond)))
 	}
 
 	// Cache the response
 	if request.TransactionID != 0 {
 		kv.cacheMtx.Lock()
 		kv.reqCache[request.TransactionID] = &RequestCache{
-			response:  &kvs.Transaction_Response{Values: make([]string, kvs.Transaction_size)},
+			response:  &kvs.Operation_Response{},
 			timestamp: time.Now(),
 		}
-		copy(kv.reqCache[request.TransactionID].response.Values, response.Values)
+		kv.reqCache[request.TransactionID].response.Value = response.Value
 		kv.cacheMtx.Unlock()
 	}
 
