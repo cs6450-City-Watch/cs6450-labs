@@ -17,16 +17,17 @@ import (
 )
 
 type Client struct {
-	rpcClient *rpc.Client
+	transactionID uint64
+	hosts         []*rpc.Client
 }
 
-func Dial(addr string) *Client {
+func Dial(addr string) *rpc.Client {
 	rpcClient, err := rpc.DialHTTP("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	return &Client{rpcClient}
+	return rpcClient
 }
 
 // Todo: change ID generation logic for serializability
@@ -34,7 +35,7 @@ func generateTransactionID() int64 {
 	var bytes [8]byte
 	_, err := rand.Read(bytes[:])
 	if err != nil {
-		log.Fatal("Failed to generate random request ID:", err)
+		log.Fatal("Failed to generate random transaction ID:", err)
 	}
 	return int64(binary.LittleEndian.Uint64(bytes[:]))
 }
@@ -47,22 +48,32 @@ func (client *Client) Abort() {
 	// TODO
 }
 
-// Sends a transaction of 3 RPC calls synchronously with retry logic
-func (client *Client) Begin(putData [3]kvs.Operation) []string {
-	requestID := generateTransactionID()
-	request := kvs.Transaction_Request{
-		TransactionID: requestID,
-		Data:          putData,
+func (client *Client) Begin() int64 {
+	transactionID := generateTransactionID()
+
+	// TODO: Other logic that has to be in Begin()
+
+	return transactionID
+}
+
+// Sends an operation that is a part of a transaction with retry logic
+func (client *Client) Execute(op kvs.Operation, destination int, transactionID int64) string {
+
+	request := kvs.Operation_Request{
+		TransactionID: transactionID,
+		Op:            op,
 	}
 
 	const maxRetries = 3
 	const baseDelay = 100 * time.Millisecond
 
 	for attempt := range maxRetries {
-		response := kvs.Transaction_Response{}
-		err := client.rpcClient.Call("KVService.Process_Transaction", &request, &response)
+		// TODO: Right now a client always sends messages to the same host!!!
+		target_server := client.hosts[destination]
+		response := kvs.Operation_Response{}
+		err := target_server.Call("KVService.Process_Operation", &request, &response)
 		if err == nil {
-			return response.Values
+			return response.Value
 		}
 
 		// Log retry attempt
@@ -75,7 +86,8 @@ func (client *Client) Begin(putData [3]kvs.Operation) []string {
 		}
 	}
 
-	return nil // unreachable
+	// TODO
+	return "nil" // unreachable
 }
 
 func hashKey(key string) uint32 {
@@ -87,29 +99,34 @@ func hashKey(key string) uint32 {
 func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64) {
 	defer wg.Done()
 
-	// Dial all hosts
-	clients := make([]*Client, len(hosts))
+	// First, build a client.
+	client := Client{}
+	participants := make([]*rpc.Client, len(hosts))
 	for i, host := range hosts {
-		clients[i] = Dial(host)
+		participants[i] = Dial(host) // Fix: use participants, not clients
 	}
+	client.hosts = participants
 
 	value := strings.Repeat("x", 128)
 	clientOpsCompleted := uint64(0)
 
 	for !done.Load() {
-		// Create transactions for each server
-		requests := make([][kvs.Transaction_size]kvs.Operation, len(hosts))
+		// Oficially begin the transaction
+		transactionID := client.Begin()
 
-		// organize work from workload
+		requests := [kvs.Transaction_size]kvs.Operation{}
+		destinations := [kvs.Transaction_size]int{}
+
+		// Process each operation in a transaction
 		for j := 0; j < kvs.Transaction_size; j++ {
 			// XXX: something may go awry here when the total number of "yields"
 			// from workload.Next() is not a clean multiple of transaction_size.
 			op := workload.Next()
 			key := fmt.Sprintf("%d", op.Key)
 
-			// Hash key to determine which server
+			// Hash key to determine which server. TODO: hash on TransactionID?
 			serverIndex := int(hashKey(key)) % len(hosts)
-			transactionRequestData := requests[serverIndex]
+
 			var trOp kvs.Operation
 
 			if op.IsRead {
@@ -121,16 +138,16 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 				trOp.Value = value
 				trOp.IsRead = false
 			}
-			transactionRequestData[j] = trOp
-			requests[serverIndex] = transactionRequestData
+			requests[j] = trOp
+			destinations[j] = serverIndex
 			clientOpsCompleted++
 		}
 
 		// Send transactions to each server
 		for i := 0; i < len(hosts); i++ {
-			transactionRequestData := requests[i]
-			if len(transactionRequestData) > 0 {
-				clients[i].Begin(transactionRequestData)
+			destination := destinations[i]
+			if len(requests) > 0 {
+				client.Execute(requests[i], destination, transactionID)
 			}
 		}
 	}
