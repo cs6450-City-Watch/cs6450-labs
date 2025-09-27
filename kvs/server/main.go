@@ -127,6 +127,26 @@ func (kv *KVService) Put(key, value string, ttl time.Duration) {
 	shard.data[key] = KeyValue{Value: value, Expiration: expiration}
 }
 
+func (kv *KVService) Can_Release_Locks(transactionID int64, clientID uint64) bool {
+	// TODO: absolutely related to 2PL's lock management
+	// Would it be helpful to involve the TransactionIDX?
+	// e.g. maybe could be of use if "availability" is determined per-operation
+	//
+	// Given a transaction ID and a client ID, determine if the locks
+	// related to that transaction can be released or not.
+	return true
+}
+
+func (kv *KVService) Release_Locks(transactionID int64, clientID uint64) {
+	// TODO: absolutely related to 2PL's lock management
+	// Would it be helpful to involve the TransactionIDX?
+	// e.g. maybe could be of use if indexing is done per-operation
+	//
+	// Given information for a transaction (and one of its operations?)
+	// release locks
+	return
+}
+
 func (kv *KVService) Prepare_Commit(query *kvs.Commit_Query, response *kvs.Commit_Query_Response) error {
 	// TODO
 	// current idea:
@@ -138,11 +158,13 @@ func (kv *KVService) Prepare_Commit(query *kvs.Commit_Query, response *kvs.Commi
 	// If there's any interface I can take advantage of after 2PL reasoning,
 	// I'd appreciate it, if only for consistency's sake.
 	response.TransactionID = query.TransactionID
-	response.ClientID = query.TransactionID
+	response.ClientID = query.ClientID
 	response.TransactionIDX = query.TransactionIDX
 
+	ready := kv.Can_Release_Locks(query.TransactionID, query.ClientID)
+
 	// TODO: decide on vote...
-	response.IsAbort = false
+	response.IsAbort = ready
 	return nil
 }
 
@@ -162,11 +184,12 @@ func (kv *KVService) Do_Abort(query *kvs.Commit_Query, response *kvs.Commit_Quer
 		kv.IncrementAborts()
 	}
 	response.TransactionID = query.TransactionID
-	response.ClientID = query.TransactionID
+	response.ClientID = query.ClientID
 	response.TransactionIDX = query.TransactionIDX
 	response.IsAbort = query.IsAbort
 
-	// TODO: alter state
+	// TODO: revert state related to the transaction
+	kv.Release_Locks(query.TransactionID, query.ClientID)
 
 	return nil
 }
@@ -192,6 +215,7 @@ func (kv *KVService) Do_Commit(query *kvs.Commit_Query, response *kvs.Commit_Que
 	response.IsAbort = query.IsAbort
 
 	// TODO: alter state
+	kv.Release_Locks(query.TransactionID, query.ClientID)
 
 	return nil
 }
