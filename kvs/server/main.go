@@ -34,6 +34,8 @@ func (s *Stats) Sub(prev *Stats) Stats {
 	r := Stats{}
 	r.puts = s.puts - prev.puts
 	r.gets = s.gets - prev.gets
+	r.commits = s.commits - prev.commits
+	r.aborts = s.aborts - prev.aborts
 	return r
 }
 
@@ -116,7 +118,7 @@ func (s *KVService) ensure(key string) *Entry {
 // }
 
 // Transactional Get method
-func (kv *KVService) Get(txID int64, key string) (string, bool) {
+func (kv *KVService) Get(txID int64, key string, forUpdate bool) (string, bool) {
 	kv.Lock()
 	kv.stats.gets++
 	kv.Unlock()
@@ -139,15 +141,32 @@ func (kv *KVService) Get(txID int64, key string) (string, bool) {
 	// Ensure entry exists
 	e := kv.ensure(key)
 
-	// Acquire ReadLock if first read
-	if tx.lockedKeys[key] == None {
-		// no wait deadlock prevention
-		if !e.TryRLock() {
-			return "abort because of no wait deadlock", false // abort: key is already locked
+	// Acquire appropriate lock based on for_update flag
+	switch tx.lockedKeys[key] {
+	case None:
+		if forUpdate {
+			if !e.TryLock() {
+				return "abort because of no wait deadlock", false
+			}
+			tx.lockedKeys[key] = WriteLock
+		} else {
+			if !e.TryRLock() {
+				return "abort because of no wait deadlock", false
+			}
+			tx.lockedKeys[key] = ReadLock
 		}
-		tx.lockedKeys[key] = ReadLock
+
+	case ReadLock:
+		if forUpdate {
+			// No-wait 2PL: we don't upgrade; fail fast so client aborts & retries taking X up front
+			return "abort because of no wait deadlock - need write", false
+		}
+		// already have S; proceed to read
+
+	case WriteLock:
+		// already exclusive; proceed
 	}
-	// If already WriteLock, can skip RLock as already have exclusive access
+	// If already WriteLock, can skip additional locking as already have exclusive access
 
 	// Read safely
 	return e.Value, true
@@ -170,7 +189,7 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 	// Ensure entry exists
 	e := kv.ensure(key)
 
-	// Acquire or upgrade to WriteLock
+	// Acquire WriteLock - abort if any conflict
 	switch tx.lockedKeys[key] {
 	case None:
 		// no wait deadlock prevention
@@ -180,14 +199,15 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 
 		tx.lockedKeys[key] = WriteLock
 	case ReadLock:
-		// TODO: Ask is this technically bad 2pl since can't automatically upgrade go locks?
-		// should i just abort and not upgrade?
-		e.RUnlock()
-		// no wait deadlock prevention
-		if !e.TryLock() {
-			return "abort because of no wait deadlock", false // abort: key is already locked
-		}
-		tx.lockedKeys[key] = WriteLock
+		return "abort because of no wait deadlock - can't upgrade read to write", false // abort: key is already locked
+		// // TODO: Ask is this technically bad 2pl since can't automatically upgrade go locks?
+		// // should i just abort and not upgrade?
+		// e.RUnlock()
+		// // no wait deadlock prevention
+		// if !e.TryLock() {
+		// 	return "abort because of no wait deadlock", false // abort: key is already locked
+		// }
+		// tx.lockedKeys[key] = WriteLock
 	case WriteLock:
 		// already exclusive
 	}
@@ -307,7 +327,7 @@ func (kv *KVService) Process_Operation(request *kvs.Operation_Request, response 
 		// if value, found := kv.Get(txID, operation.Key); found {
 		// 	response.Value = value
 		// }
-		response.Value, response.Success = kv.Get(txID, operation.Key)
+		response.Value, response.Success = kv.Get(txID, operation.Key, operation.ForUpdate)
 
 	} else {
 		response.Value, response.Success = kv.Put(txID, operation.Key, operation.Value)
@@ -340,10 +360,14 @@ func (kv *KVService) printStats() {
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
 
-	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
+
+	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\ncommits/s %0.2f\naborts/s %0.2f\n\n",
 		float64(diff.gets)/deltaS,
 		float64(diff.puts)/deltaS,
-		float64(diff.gets+diff.puts)/deltaS)
+		float64(diff.gets+diff.puts)/deltaS,
+		float64(diff.commits)/deltaS,
+		float64(diff.aborts)/deltaS,
+	)
 }
 
 func main() {
