@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -17,10 +15,26 @@ import (
 )
 
 type Client struct {
-	clientID      uint
-	transactionID uint64
-	writeSet      map[string]string // TODO: Currently unusued. Read canvas for hints
-	hosts         []*rpc.Client
+	clientID  uint
+	txCounter uint64
+	hosts     []*rpc.Client
+}
+
+func (c *Client) nextTxID() int64 {
+	n := atomic.AddUint64(&c.txCounter, 1)
+	// Embed clientID in the upper 16 bits, txCounter in the lower 48 bits
+	id := (uint64(c.clientID) << 48) | (n & ((1 << 48) - 1))
+	return int64(id)
+}
+
+// helper to broadcast a method call to all hosts. This is used for Commit and Abort.
+func (c *Client) broadcastMethod(method string, txID int64) {
+	for _, host := range c.hosts {
+		// use dummy reply struct
+		if err := host.Call("KVService."+method, &txID, &struct{}{}); err != nil {
+			log.Fatal("RPC call failed:", err)
+		}
+	}
 }
 
 func Dial(addr string) *rpc.Client {
@@ -32,67 +46,50 @@ func Dial(addr string) *rpc.Client {
 	return rpcClient
 }
 
-// Todo: Embed clientID into a transactionID
-func generateTransactionID(clientID uint) int64 {
-	var bytes [8]byte
-	_, err := rand.Read(bytes[:])
-	if err != nil {
-		log.Fatal("Failed to generate random transaction ID:", err)
-	}
-	return int64(binary.LittleEndian.Uint64(bytes[:]))
+// // Todo: Embed clientID into a transactionID
+// func generateTransactionID(clientID uint) int64 {
+// 	var bytes [8]byte
+// 	_, err := rand.Read(bytes[:])
+// 	if err != nil {
+// 		log.Fatal("Failed to generate random transaction ID:", err)
+// 	}
+// 	return int64(binary.LittleEndian.Uint64(bytes[:]))
+// }
+
+func (client *Client) Commit(operations []kvs.Operation, destinations []int, transactionID int64) {
+	client.broadcastMethod("Commit", transactionID)
 }
 
-func (client *Client) Commit(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
-	// TODO
-}
-
-func (client *Client) Abort(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
-	// TODO
+func (client *Client) Abort(operations []kvs.Operation, destinations []int, transactionID int64) {
+	client.broadcastMethod("Abort", transactionID)
 }
 
 func (client *Client) Begin() int64 {
-	transactionID := generateTransactionID(client.clientID)
-
-	// TODO: Other logic that has to be in Begin()
-
+	transactionID := client.nextTxID()
+	client.broadcastMethod("Begin", transactionID)
 	return transactionID
 }
 
-// Sends an operation that is a part of a transaction with retry logic
-func (client *Client) Prepare(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) string {
-	for i := 0; i < kvs.Transaction_size; i++ {
-		op := operations[i]
+// Sends an operation that is a part of a transaction
+func (client *Client) Prepare(operations []kvs.Operation, destinations []int, transactionID int64) bool {
+	for i := 0; i < len(operations); i++ {
 		request := kvs.Operation_Request{
 			TransactionID: transactionID,
-			Op:            op,
+			Op:            operations[i],
 		}
 
-		const maxRetries = 3
-		const baseDelay = 100 * time.Millisecond
+		// get correct server
+		server := client.hosts[destinations[i]]
 
-		for attempt := range maxRetries {
-			// TODO: Right now a client always sends messages to the same host!!!
-			target_server := client.hosts[destinations[i]]
-			response := kvs.Operation_Response{}
-			err := target_server.Call("KVService.Process_Operation", &request, &response)
-			if err == nil {
-				return response.Value
-			}
-
-			// Log retry attempt
-			if attempt < maxRetries-1 {
-				delay := baseDelay * time.Duration(1<<attempt) // delay *= 2
-				log.Printf("RPC call failed (attempt %d/%d): %v, retrying in %v", attempt+1, maxRetries, err, delay)
-				time.Sleep(delay)
-			} else {
-				log.Fatal("RPC call failed after all retries:", err)
-			}
+		resp := kvs.Operation_Response{}
+		if err := server.Call("KVService.Process_Operation", &request, &resp); err != nil {
+			log.Fatal("RPC call failed:", err)
 		}
-
-		// TODO
-		return "nil" // unreachable
+		if !resp.Success { // Abort the transaction if any operation fails
+			return false
+		}
 	}
-	return "success?" // TODO
+	return true
 }
 
 func hashKey(key string) uint32 {
@@ -101,11 +98,45 @@ func hashKey(key string) uint32 {
 	return h.Sum32()
 }
 
-func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64) {
+// transaction for original workload
+func buildTxn(workload *kvs.Workload, hosts []string) ([]kvs.Operation, []int) {
+	value := strings.Repeat("x", 128) // just a dummy value
+
+	operations := [kvs.Transaction_size]kvs.Operation{}
+	destinations := [kvs.Transaction_size]int{}
+
+	// Process each operation in a transaction
+	for j := 0; j < kvs.Transaction_size; j++ {
+		op := workload.Next()
+		key := fmt.Sprintf("%d", op.Key)
+		// Hash key to determine which server.
+		serverIndex := int(hashKey(key)) % len(hosts)
+
+		var trOp kvs.Operation
+
+		if op.IsRead {
+			trOp.Key = key
+			trOp.Value = ""
+			trOp.IsRead = true
+		} else {
+			trOp.Key = key
+			trOp.Value = value
+			trOp.IsRead = false
+		}
+		operations[j] = trOp
+		destinations[j] = serverIndex
+	}
+	return operations[:], destinations[:]
+}
+
+func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64, clientID int) {
 	defer wg.Done()
 
 	// First, build a client.
-	client := Client{}
+	client := Client{
+		clientID:  uint(clientID),
+		txCounter: 0,
+	}
 	// TODO: Generate client ID
 
 	participants := make([]*rpc.Client, len(hosts))
@@ -114,53 +145,21 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 	}
 	client.hosts = participants
 
-	value := strings.Repeat("x", 128)
 	clientOpsCompleted := uint64(0)
 
 	for !done.Load() {
-		// Oficially begin the transaction
-		transactionID := client.Begin()
+		ops, dests := buildTxn(workload, hosts)
 
-		requests := [kvs.Transaction_size]kvs.Operation{}
-		destinations := [kvs.Transaction_size]int{}
-
-		// Process each operation in a transaction
-		for j := 0; j < kvs.Transaction_size; j++ {
-			// XXX: something may go awry here when the total number of "yields"
-			// from workload.Next() is not a clean multiple of transaction_size.
-			op := workload.Next()
-			key := fmt.Sprintf("%d", op.Key)
-
-			// Hash key to determine which server.
-			serverIndex := int(hashKey(key)) % len(hosts)
-
-			var trOp kvs.Operation
-
-			if op.IsRead {
-				trOp.Key = key
-				trOp.Value = ""
-				trOp.IsRead = true
-			} else {
-				trOp.Key = key
-				trOp.Value = value
-				trOp.IsRead = false
+		// attempt until prepared successfully
+		for {
+			txID := client.Begin()
+			if client.Prepare(ops, dests, txID) {
+				client.Commit(ops, dests, txID)
+				clientOpsCompleted += uint64(len(ops))
+				break
 			}
-			requests[j] = trOp
-			destinations[j] = serverIndex
-			clientOpsCompleted++
-		}
-
-		// Execute transaction without commmit
-		if len(requests) > 0 {
-			client.Prepare(requests, destinations, transactionID)
-		}
-
-		// Commit/Abort logic
-		if 1 == 1 {
-			// Commit transaction
-			if len(requests) > 0 {
-				client.Commit(requests, destinations, transactionID)
-			}
+			client.Abort(ops, dests, txID)
+			// loop repeats with a NEW txID from Begin()
 		}
 	}
 	atomic.AddUint64(totalOpsCompleted, clientOpsCompleted) // TODO: only really accurate after at-least-once
@@ -175,7 +174,7 @@ func runClient(id int, hosts []string, done *atomic.Bool, workload *kvs.Workload
 		wg.Add(1)
 	}
 	for connId := 0; connId < numConnections; connId++ {
-		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted)
+		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted, connId)
 	}
 
 	fmt.Println("waiting for connections to finish")
