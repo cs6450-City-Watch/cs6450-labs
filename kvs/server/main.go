@@ -137,6 +137,12 @@ func (kv *KVService) Prepare_Commit(query *kvs.Commit_Query, response *kvs.Commi
 	//
 	// If there's any interface I can take advantage of after 2PL reasoning,
 	// I'd appreciate it, if only for consistency's sake.
+	response.TransactionID = query.TransactionID
+	response.ClientID = query.TransactionID
+	response.TransactionIDX = query.TransactionIDX
+
+	// TODO: decide on vote...
+	response.IsAbort = false
 	return nil
 }
 
@@ -152,6 +158,16 @@ func (kv *KVService) Do_Abort(query *kvs.Commit_Query, response *kvs.Commit_Quer
 	//
 	// If there's any interface I can take advantage of after 2PL reasoning,
 	// I'd appreciate it, if only for consistency's sake.
+	if query.Lead {
+		kv.IncrementAborts()
+	}
+	response.TransactionID = query.TransactionID
+	response.ClientID = query.TransactionID
+	response.TransactionIDX = query.TransactionIDX
+	response.IsAbort = query.IsAbort
+
+	// TODO: alter state
+
 	return nil
 }
 
@@ -167,6 +183,16 @@ func (kv *KVService) Do_Commit(query *kvs.Commit_Query, response *kvs.Commit_Que
 	//
 	// If there's any interface I can take advantage of after 2PL reasoning,
 	// I'd appreciate it, if only for consistency's sake.
+	if query.Lead {
+		kv.IncrementCommits()
+	}
+	response.TransactionID = query.TransactionID
+	response.ClientID = query.TransactionID
+	response.TransactionIDX = query.TransactionIDX
+	response.IsAbort = query.IsAbort
+
+	// TODO: alter state
+
 	return nil
 }
 
