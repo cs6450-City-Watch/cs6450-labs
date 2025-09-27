@@ -16,4 +16,6 @@ type Operation struct {
 	Key    string
 	Value  string
 	IsRead bool
+	// default false
+	ForUpdate bool
 }
