@@ -20,14 +20,14 @@ import (
 )
 
 type Stats struct {
-	puts uint64
-	gets uint64
+	commits uint64
+	aborts  uint64
 }
 
 func (s *Stats) Sub(prev *Stats) Stats {
 	r := Stats{}
-	r.puts = s.puts - prev.puts
-	r.gets = s.gets - prev.gets
+	r.commits = s.commits - prev.commits
+	r.aborts = s.aborts - prev.aborts
 	return r
 }
 
@@ -88,6 +88,17 @@ func (kv *KVService) GetShardIndex(key string) int {
 	return int(hash) % len(kv.shards)
 }
 
+func (kv *KVService) IncrementCommits() {
+	kv.Lock()
+	defer kv.Unlock()
+	kv.stats.commits++
+}
+func (kv *KVService) IncrementAborts() {
+	kv.Lock()
+	defer kv.Unlock()
+	kv.stats.aborts++
+}
+
 // single getter method
 // not I/O bound, just a helper per request
 func (kv *KVService) Get(key string) (string, bool) {
@@ -116,12 +127,47 @@ func (kv *KVService) Put(key, value string, ttl time.Duration) {
 	shard.data[key] = KeyValue{Value: value, Expiration: expiration}
 }
 
-func (kv *KVService) Commit(TransactionID int64) {
+func (kv *KVService) Prepare_Commit(query *kvs.Commit_Query, response *kvs.Commit_Query_Response) error {
 	// TODO
+	// current idea:
+	// `Commit_Query` should identify some relevant lock.
+	// We inspect that lock, see if it's held,
+	// and if it is, we vote no.
+	// If it isn't, we vote yes.
+	//
+	// If there's any interface I can take advantage of after 2PL reasoning,
+	// I'd appreciate it, if only for consistency's sake.
+	return nil
 }
 
-func (kv *KVService) Abort(TransactionID int64) {
+func (kv *KVService) Do_Abort(query *kvs.Commit_Query, response *kvs.Commit_Query_Response) error {
 	// TODO
+	// current idea:
+	// `Commit_Query` should identify all actions in the write-ahead cache
+	// and we can clear those.
+	// Alternatively we have a cache relevant to the transaction as a whole.
+	// Either way, we make sure everything relevant is cleared,
+	// and then send an acknowledgement.
+	// Results may vary with other threads trying to acquire locks.
+	//
+	// If there's any interface I can take advantage of after 2PL reasoning,
+	// I'd appreciate it, if only for consistency's sake.
+	return nil
+}
+
+func (kv *KVService) Do_Commit(query *kvs.Commit_Query, response *kvs.Commit_Query_Response) error {
+	// TODO
+	// current idea:
+	// `Commit_Query` should identify all actions in the write-ahead cache
+	// and we can commit those.
+	// Alternatively we have a cache relevant to the transaction as a whole.
+	// Either way, we make sure everything relevant is committed,
+	// and then send an acknowledgement.
+	// Results may vary with other threads trying to acquire locks.
+	//
+	// If there's any interface I can take advantage of after 2PL reasoning,
+	// I'd appreciate it, if only for consistency's sake.
+	return nil
 }
 
 // Accepts a single Put/Get operation. Returns a response
@@ -138,7 +184,7 @@ func (kv *KVService) Process_Operation(request *kvs.Operation_Request, response 
 		}
 	}
 
-	kv.stats.puts += uint64(kvs.Transaction_size)
+	// kv.stats.puts += uint64(kvs.Transaction_size) // did this ever work?
 
 	operation := request.Op
 
@@ -178,10 +224,10 @@ func (kv *KVService) printStats() {
 	diff := stats.Sub(&prevStats)
 	deltaS := now.Sub(lastPrint).Seconds()
 
-	fmt.Printf("get/s %0.2f\nput/s %0.2f\nops/s %0.2f\n\n",
-		float64(diff.gets)/deltaS,
-		float64(diff.puts)/deltaS,
-		float64(diff.gets+diff.puts)/deltaS)
+	fmt.Printf("commit/s %0.2f\nabort/s %0.2f\nops/s %0.2f (note this last metric is relative)\n\n",
+		float64(diff.commits)/deltaS,
+		float64(diff.aborts)/deltaS,
+		float64(diff.commits+diff.aborts)/deltaS)
 }
 
 func main() {

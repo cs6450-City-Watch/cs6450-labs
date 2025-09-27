@@ -3,7 +3,7 @@ package kvs
 const Transaction_size = 3
 
 type Operation_Request struct {
-	TransactionID int64
+	TransactionID int64 // should probably change this to match others
 	Op            Operation
 }
 
@@ -16,3 +16,32 @@ type Operation struct {
 	Value  string
 	IsRead bool
 }
+
+type Commit_Query struct {
+	TransactionID  int64
+	ClientID       uint64
+	TransactionIDX int16
+}
+
+type Commit_Query_Response struct {
+	TransactionID  int64
+	ClientID       uint64
+	TransactionIDX int16
+	IsAbort        bool
+}
+
+type Commit_Imperative struct {
+	TransactionID  int64
+	ClientID       uint64
+	TransactionIDX int16
+	IsAbort        bool
+	Lead           bool
+}
+
+type Commit_Imperative_Response struct {
+	TransactionID  int64
+	ClientID       uint64
+	TransactionIDX int16
+	IsAbort        bool
+}
+

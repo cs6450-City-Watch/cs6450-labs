@@ -17,8 +17,8 @@ import (
 )
 
 type Client struct {
-	clientID      uint
-	transactionID uint64
+	clientID      uint64
+	// transactionID uint64 // we already have parameters passing this around
 	writeSet      map[string]string // TODO: Currently unusued. Read canvas for hints
 	hosts         []*rpc.Client
 }
@@ -33,7 +33,7 @@ func Dial(addr string) *rpc.Client {
 }
 
 // Todo: Embed clientID into a transactionID
-func generateTransactionID(clientID uint) int64 {
+func generateTransactionID(clientID uint64) int64 {
 	var bytes [8]byte
 	_, err := rand.Read(bytes[:])
 	if err != nil {
@@ -42,12 +42,123 @@ func generateTransactionID(clientID uint) int64 {
 	return int64(binary.LittleEndian.Uint64(bytes[:]))
 }
 
+func (client *Client) TryCommit(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
+	// https://en.wikipedia.org/wiki/Two-phase_commit_protocol#Message_flow
+	//
+	// 1. Coordinator queries participants to commit
+	// 2. Participants respond with a vote of Yes or No
+	// 3. Coordinator gathers all responses
+	// 4. If any response is "no", abort; else, "imperative" to commit
+	// Acknowledgements are implicit for steps 1-4,
+	// but we cannot leave any participant in an inconsistent state
+	// so we must ensure at-least-once semantics
+
+	isAbort := false
+	// XXX: `TransactionIDX` is really only determined by this for-loop, and not by anything intrinsic to any message
+	// coordinating this with servers may be a pain?
+	for i := 0; i < kvs.Transaction_size; i++ {
+		query := kvs.Commit_Query{transactionID, client.clientID, int16(i)}
+		response := kvs.Commit_Query_Response{}
+		target_server := client.hosts[destinations[i]] // TODO: may change or be incorrect
+
+		const maxRetries = 3
+		const baseDelay = 100 * time.Millisecond
+
+		// assume will vote no
+		isAbort := true
+		for attempt := range maxRetries {
+			err := target_server.Call("KVService.Prepare_Commit", &query, &response)
+
+			if err == nil {
+				// verify response information matches query
+				tid_matches := query.TransactionID == response.TransactionID
+				cid_matches := query.ClientID == response.ClientID
+				tidx_matches := query.TransactionIDX == response.TransactionIDX
+
+				// request again if information doesn't match up
+				if (tid_matches) && (cid_matches) && (tidx_matches) {
+					isAbort = response.IsAbort
+					break // attempt loop
+				}
+			} else if attempt < maxRetries-1 {
+				delay := baseDelay * time.Duration(1<<attempt) // delay *= 2
+				log.Printf("Commit query failed (attempt %d/%d): %v, retrying in %v", attempt+1, maxRetries, err, delay)
+				time.Sleep(delay)
+			} else {
+				log.Fatal("Commit query after all retries:", err)
+				isAbort = true
+			}
+		}
+		// don't have to query more if someone voted no
+		// XXX: come back to this. I might be missing some edge case
+		// e.g., does the server track and compare against the prepare query?
+		if isAbort {
+			break
+		}
+	}
+	// TODO
+	if isAbort {
+		log.Printf("Aborting transaction (%d)", transactionID)
+		client.Abort(operations, destinations, transactionID)
+	} else {
+		client.Commit(operations, destinations, transactionID)
+	}
+}
+
 func (client *Client) Commit(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
 	// TODO
+	doCommitResponse := kvs.Commit_Imperative_Response{}
+	isLead := true
+
+	for i := 0; i < kvs.Transaction_size; i++ {
+		doCommit := kvs.Commit_Imperative{transactionID, client.clientID, int16(i), false, isLead}
+		target_server := client.hosts[destinations[i]]
+		for {
+			// loop until acknowledged
+			// XXX: obviously assumes the receiver is alive
+			// AND that the response will have valid data
+			err := target_server.Call("KVService.Do_Commit", &doCommit, &doCommitResponse)
+			if err != nil {
+				continue
+			}
+			
+			tid_matches := doCommit.TransactionID == doCommitResponse.TransactionID
+			cid_matches := doCommit.ClientID == doCommitResponse.ClientID
+			tidx_matches := doCommit.TransactionIDX == doCommitResponse.TransactionIDX
+			if (tid_matches) && (cid_matches) && (tidx_matches) {
+				break
+			}
+		}
+		isLead = false
+	}
 }
 
 func (client *Client) Abort(operations [kvs.Transaction_size]kvs.Operation, destinations [kvs.Transaction_size]int, transactionID int64) {
 	// TODO
+	doAbortResponse := kvs.Commit_Imperative_Response{}
+	isLead := true
+
+	for i := 0; i < kvs.Transaction_size; i++ {
+		doAbort := kvs.Commit_Imperative{transactionID, client.clientID, int16(i), true, isLead}
+		target_server := client.hosts[destinations[i]]
+		for {
+			// loop until acknowledged
+			// XXX: obviously assumes the receiver is alive
+			// AND that the response will have valid data
+			err := target_server.Call("KVService.Do_Abort", &doAbort, &doAbortResponse)
+			if err != nil {
+				continue
+			}
+			
+			tid_matches := doAbort.TransactionID == doAbortResponse.TransactionID
+			cid_matches := doAbort.ClientID == doAbortResponse.ClientID
+			tidx_matches := doAbort.TransactionIDX == doAbortResponse.TransactionIDX
+			if (tid_matches) && (cid_matches) && (tidx_matches) {
+				break
+			}
+		}
+		isLead = false
+	}
 }
 
 func (client *Client) Begin() int64 {
@@ -159,7 +270,7 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 		if 1 == 1 {
 			// Commit transaction
 			if len(requests) > 0 {
-				client.Commit(requests, destinations, transactionID)
+				client.TryCommit(requests, destinations, transactionID)
 			}
 		}
 	}
