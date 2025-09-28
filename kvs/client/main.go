@@ -131,7 +131,7 @@ func buildTxn(workload *kvs.Workload, hosts []string) ([]kvs.Operation, []int) {
 	return operations[:], destinations[:]
 }
 
-func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64, clientID int) {
+func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64, clientID int, payments bool, ready *atomic.Bool) {
 	fmt.Println("Starting connection", clientID)
 	defer wg.Done()
 
@@ -150,36 +150,183 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 
 	clientOpsCompleted := uint64(0)
 
-	for !done.Load() {
-		ops, dests := buildTxn(workload, hosts)
-		// fmt.Printf("Client %d: Starting transaction with operations: %v\n", clientID, ops)
-
-		// attempt until prepared successfully . Don't go for more than maxAttempts since for example if try to read then write in same transaction (which will happen in YCSB-A) it will never succeed. and just waste time and freeze that client.
-		maxAttempts := 5
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			txID := client.Begin()
-			if client.Prepare(ops, dests, txID) {
-				client.Commit(ops, dests, txID)
-				clientOpsCompleted += uint64(len(ops))
-				break
+	// ------ NORMAL WORKLOAD PATH ----------
+	if !payments {
+		// --- YCSB path (what you already had) ---
+		for !done.Load() {
+			ops, dests := buildTxn(workload, hosts)
+			maxAttempts := 5
+			for attempt := 0; attempt < maxAttempts; attempt++ {
+				txID := client.Begin()
+				if client.Prepare(ops, dests, txID) {
+					client.Commit(ops, dests, txID)
+					clientOpsCompleted += uint64(len(ops))
+					break
+				}
+				client.Abort(ops, dests, txID)
 			}
-			client.Abort(ops, dests, txID)
-			// loop repeats with a NEW txID from Begin()
+		}
+		atomic.AddUint64(totalOpsCompleted, clientOpsCompleted)
+		return
+	}
+
+	// -------- PAYMENTS PATH ----------
+	// Map this goroutine to one of the 10 accounts
+	src := clientID % 10
+	dst := (src + 1) % 10
+
+	// Only goroutine 0 initializes accounts once
+	if clientID == 0 {
+		initAccounts(&client, hosts) // sets all 10 accounts to "1000"
+		ready.Store(true)            // signal everyone to start
+		fmt.Println("Payments: accounts initialized; starting transfers.")
+	} else {
+		// Wait for init
+		for !ready.Load() && !done.Load() {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Run transfers; every 5 successful transfers, goroutine 0 audits
+	succ := 0
+	for !done.Load() {
+		if runPaymentTxn(&client, hosts, src, dst) {
+			succ++
+			clientOpsCompleted += 4 // each payment txn does 2 reads + 2 writes in your helper
+
+			if succ%5 == 0 && clientID == 0 {
+				total, balances, ok := auditSumTxn(&client, hosts)
+				if !ok {
+					log.Println("Audit failed to read balances; will retry next time.")
+				} else if total != 10000 {
+					log.Fatalf("Invariant broken! total=%d balances=%v", total, balances)
+				} else {
+					fmt.Printf("Audit OK: total=%d balances=%v\n", total, balances)
+				}
+			}
+		} else {
+			// aborted (e.g., src had < $100); small backoff avoids hot spinning
+			time.Sleep(2 * time.Millisecond)
 		}
 	}
 	atomic.AddUint64(totalOpsCompleted, clientOpsCompleted) // TODO: only really accurate after at-least-once
 }
 
-func runClient(id int, hosts []string, done *atomic.Bool, workload *kvs.Workload, numConnections int, resultsCh chan<- uint64) {
+//	--------------- CODE FOR TESTING --------------
+
+// rpcGet returns (value, ok)
+func (c *Client) rpcGet(txID int64, key string, forUpdate bool, hosts []string) (string, bool) {
+	req := kvs.Operation_Request{TransactionID: txID,
+		Op: kvs.Operation{Key: key, IsRead: true, ForUpdate: forUpdate}}
+	dest := int(hashKey(key)) % len(hosts)
+	var resp kvs.Operation_Response
+	if err := c.hosts[dest].Call("KVService.Process_Operation", &req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	return resp.Value, resp.Success
+}
+
+func (c *Client) rpcPut(txID int64, key, val string, hosts []string) bool {
+	req := kvs.Operation_Request{TransactionID: txID,
+		Op: kvs.Operation{Key: key, Value: val, IsRead: false}}
+	dest := int(hashKey(key)) % len(hosts)
+	var resp kvs.Operation_Response
+	if err := c.hosts[dest].Call("KVService.Process_Operation", &req, &resp); err != nil {
+		log.Fatal(err)
+	}
+	return resp.Success
+}
+
+// Initialize 10 accounts to "1000" each (run once by clientID==0)
+func initAccounts(c *Client, hosts []string) {
+	tx := c.Begin()
+	for i := 0; i < 10; i++ {
+		if !c.rpcPut(tx, fmt.Sprintf("%d", i), "1000", hosts) {
+			c.Abort(nil, nil, tx)
+			log.Fatal("initAccounts: put failed, aborting")
+		}
+	}
+	c.Commit(nil, nil, tx)
+}
+
+// One payment transfer: move $100 from src -> dst
+func runPaymentTxn(c *Client, hosts []string, src, dst int) bool {
+	tx := c.Begin()
+
+	// X-lock both accounts up front (avoid upgrades)
+	sVal, ok := c.rpcGet(tx, fmt.Sprintf("%d", src), true, hosts)
+	if !ok {
+		c.Abort(nil, nil, tx)
+		return false
+	}
+	dVal, ok := c.rpcGet(tx, fmt.Sprintf("%d", dst), true, hosts)
+	if !ok {
+		c.Abort(nil, nil, tx)
+		return false
+	}
+
+	// parse balances (default 0 if empty)
+	sBal, dBal := 0, 0
+	if sVal != "" {
+		fmt.Sscanf(sVal, "%d", &sBal)
+	}
+	if dVal != "" {
+		fmt.Sscanf(dVal, "%d", &dBal)
+	}
+
+	if sBal < 100 {
+		c.Abort(nil, nil, tx)
+		return false
+	}
+
+	// write both sides
+	if !c.rpcPut(tx, fmt.Sprintf("%d", src), fmt.Sprintf("%d", sBal-100), hosts) {
+		c.Abort(nil, nil, tx)
+		return false
+	}
+	if !c.rpcPut(tx, fmt.Sprintf("%d", dst), fmt.Sprintf("%d", dBal+100), hosts) {
+		c.Abort(nil, nil, tx)
+		return false
+	}
+
+	c.Commit(nil, nil, tx)
+	return true
+}
+
+func auditSumTxn(c *Client, hosts []string) (int, []int, bool) {
+	tx := c.Begin()
+	total := 0
+	balances := make([]int, 10)
+	for i := 0; i < 10; i++ {
+		v, ok := c.rpcGet(tx, fmt.Sprintf("%d", i), false, hosts)
+		if !ok {
+			c.Abort(nil, nil, tx)
+			return 0, nil, false
+		}
+		b := 0
+		if v != "" {
+			fmt.Sscanf(v, "%d", &b)
+		}
+		balances[i] = b
+		total += b
+	}
+	c.Commit(nil, nil, tx)
+	return total, balances, true
+}
+
+// -------------- End of Code for Testing ---------------
+
+func runClient(id int, hosts []string, done *atomic.Bool, workload *kvs.Workload, numConnections int, resultsCh chan<- uint64, payments bool) {
 	var wg sync.WaitGroup
 	totalOpsCompleted := uint64(0)
 
+	var ready atomic.Bool
 	// instantiate waitgroup before goroutines
 	for connId := 0; connId < numConnections; connId++ {
 		wg.Add(1)
 	}
 	for connId := 0; connId < numConnections; connId++ {
-		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted, connId)
+		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted, connId, payments, &ready)
 	}
 
 	fmt.Println("waiting for connections to finish")
@@ -207,6 +354,7 @@ func main() {
 	workload := flag.String("workload", "YCSB-B", "Workload type (YCSB-A, YCSB-B, YCSB-C)")
 	secs := flag.Int("secs", 30, "Duration in seconds for each client to run")
 	numConnections := flag.Int("connections", 1, "Number of connections per client")
+	payments := flag.Bool("payments", false, "Run payment workload test (10 accounts)")
 
 	flag.Parse()
 
@@ -231,7 +379,7 @@ func main() {
 	clientId := 0
 	go func(clientId int) {
 		workload := kvs.NewWorkload(*workload, *theta)
-		runClient(clientId, hosts, &done, workload, *numConnections, resultsCh)
+		runClient(clientId, hosts, &done, workload, *numConnections, resultsCh, *payments)
 	}(clientId)
 
 	time.Sleep(time.Duration(*secs) * time.Second)
