@@ -86,6 +86,7 @@ func (client *Client) Prepare(operations []kvs.Operation, destinations []int, tr
 			log.Fatal("RPC call failed:", err)
 		}
 		if !resp.Success { // Abort the transaction if any operation fails
+			fmt.Println("Operation failed with abort:", resp.Value)
 			return false
 		}
 	}
@@ -118,6 +119,7 @@ func buildTxn(workload *kvs.Workload, hosts []string) ([]kvs.Operation, []int) {
 			trOp.Key = key
 			trOp.Value = ""
 			trOp.IsRead = true
+			// trOp.ForUpdate = true
 		} else {
 			trOp.Key = key
 			trOp.Value = value
@@ -130,6 +132,7 @@ func buildTxn(workload *kvs.Workload, hosts []string) ([]kvs.Operation, []int) {
 }
 
 func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, workload *kvs.Workload, totalOpsCompleted *uint64, clientID int) {
+	fmt.Println("Starting connection", clientID)
 	defer wg.Done()
 
 	// First, build a client.
@@ -149,9 +152,11 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 
 	for !done.Load() {
 		ops, dests := buildTxn(workload, hosts)
+		// fmt.Printf("Client %d: Starting transaction with operations: %v\n", clientID, ops)
 
-		// attempt until prepared successfully
-		for {
+		// attempt until prepared successfully . Don't go for more than maxAttempts since for example if try to read then write in same transaction (which will happen in YCSB-A) it will never succeed. and just waste time and freeze that client.
+		maxAttempts := 5
+		for attempt := 0; attempt < maxAttempts; attempt++ {
 			txID := client.Begin()
 			if client.Prepare(ops, dests, txID) {
 				client.Commit(ops, dests, txID)
