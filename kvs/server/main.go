@@ -159,7 +159,7 @@ func (kv *KVService) Get(txID int64, key string, forUpdate bool) (string, bool) 
 	case ReadLock:
 		if forUpdate {
 			// No-wait 2PL: we don't upgrade; fail fast so client aborts & retries taking X up front
-			return "abort because of no wait deadlock - need write", false
+			return "abort because of no wait deadlock - can't upgrade a readlock (forUpdate read)", false
 		}
 		// already have S; proceed to read
 
@@ -199,7 +199,8 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 
 		tx.lockedKeys[key] = WriteLock
 	case ReadLock:
-		return "abort because of no wait deadlock - can't upgrade read to write", false // abort: key is already locked
+		// fmt.Println("UPGRADE ATTEMPT ABORTED")
+		return "abort because of no wait deadlock - can't upgrade read lock on write, key: " + key, false // abort: key is already locked
 		// // TODO: Ask is this technically bad 2pl since can't automatically upgrade go locks?
 		// // should i just abort and not upgrade?
 		// e.RUnlock()
@@ -217,11 +218,11 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 	return value, true
 }
 
-func (kv *KVService) Begin(txID int64) {
+func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 	// Check if transaction already exists
-	if _, exists := kv.txs.data.Load(txID); exists {
+	if _, exists := kv.txs.data.Load(*txID); exists {
 		// TODO: should panic rather than return
-		return // already active
+		return nil // already active
 	}
 
 	// Create and store new transaction
@@ -229,19 +230,20 @@ func (kv *KVService) Begin(txID int64) {
 		writeAheadMap: make(map[string]string),
 		lockedKeys:    make(map[string]LockKind),
 	}
-	kv.txs.data.Store(txID, tx)
+	kv.txs.data.Store(*txID, tx)
+	return nil
 }
 
-func (kv *KVService) Commit(txID int64) {
+func (kv *KVService) Commit(txID *int64, response *struct{}) error {
 	kv.Lock()
 	kv.stats.commits++
 	kv.Unlock()
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(txID)
+	v, ok := kv.txs.data.Load(*txID)
 	if !ok {
 		// TODO: should panic rather than return as committing a non-existent tx
-		return
+		return nil
 	}
 	tx := v.(*TxState)
 
@@ -270,19 +272,20 @@ func (kv *KVService) Commit(txID int64) {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(txID)
+	kv.txs.data.Delete(*txID)
+	return nil
 }
 
-func (kv *KVService) Abort(txID int64) {
+func (kv *KVService) Abort(txID *int64, response *struct{}) error {
 	kv.Lock()
 	kv.stats.aborts++
 	kv.Unlock()
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(txID)
+	v, ok := kv.txs.data.Load(*txID)
 	if !ok {
 		// TODO: should panic as aborting a non-existent tx
-		return
+		return nil
 	}
 	tx := v.(*TxState)
 
@@ -301,7 +304,8 @@ func (kv *KVService) Abort(txID int64) {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(txID)
+	kv.txs.data.Delete(*txID)
+	return nil
 }
 
 // Accepts a single Put/Get operation. Returns a response
@@ -327,9 +331,11 @@ func (kv *KVService) Process_Operation(request *kvs.Operation_Request, response 
 		// if value, found := kv.Get(txID, operation.Key); found {
 		// 	response.Value = value
 		// }
+		// fmt.Println("GET", operation.Key)
 		response.Value, response.Success = kv.Get(txID, operation.Key, operation.ForUpdate)
 
 	} else {
+		// fmt.Println("PUT", operation.Key, operation.Value)
 		response.Value, response.Success = kv.Put(txID, operation.Key, operation.Value)
 	}
 
