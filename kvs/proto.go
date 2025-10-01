@@ -8,11 +8,14 @@ type Operation_Request struct {
 }
 
 type Operation_Response struct {
-	Value string
+	Value   string
+	Success bool
 }
 
 type Operation struct {
 	Key    string
 	Value  string
 	IsRead bool
+	// default false
+	ForUpdate bool
 }
