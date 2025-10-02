@@ -60,11 +60,24 @@ func Dial(addr string) *rpc.Client {
 // 	return int64(binary.LittleEndian.Uint64(bytes[:]))
 // }
 
-func (client *Client) Commit(operations []kvs.Operation, destinations []int, transactionID int64) {
-	client.broadcastMethod("Commit", transactionID)
+func (client *Client) TryCommit(operations []kvs.Operation, destinations []int, transactionID int64) {
+	canCommit := true
+	for _, host := range client.hosts {
+		err := host.Call("KVService.CanCommit", &transactionID, &canCommit)
+		if err != nil || !canCommit {
+			canCommit = false
+			break
+		}
+	}
+
+	if canCommit {
+		client.broadcastMethod("Commit", transactionID)
+	} else {
+		client.DefinitelyAbort(operations, destinations, transactionID)
+	}
 }
 
-func (client *Client) Abort(operations []kvs.Operation, destinations []int, transactionID int64) {
+func (client *Client) DefinitelyAbort(operations []kvs.Operation, destinations []int, transactionID int64) {
 	client.broadcastMethod("Abort", transactionID)
 }
 
@@ -162,11 +175,11 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 			for attempt := 0; attempt < maxAttempts; attempt++ {
 				txID := client.Begin()
 				if client.Prepare(ops, dests, txID) {
-					client.Commit(ops, dests, txID)
+					client.TryCommit(ops, dests, txID)
 					clientOpsCompleted += uint64(len(ops))
 					break
 				}
-				client.Abort(ops, dests, txID)
+				client.DefinitelyAbort(ops, dests, txID)
 			}
 		}
 		atomic.AddUint64(totalOpsCompleted, clientOpsCompleted)
@@ -245,11 +258,11 @@ func initAccounts(c *Client, hosts []string) {
 	tx := c.Begin()
 	for i := 0; i < 10; i++ {
 		if !c.rpcPut(tx, fmt.Sprintf("%d", i), "1000", hosts) {
-			c.Abort(nil, nil, tx)
+			c.DefinitelyAbort(nil, nil, tx)
 			log.Fatal("initAccounts: put failed, aborting")
 		}
 	}
-	c.Commit(nil, nil, tx)
+	c.TryCommit(nil, nil, tx)
 }
 
 // One payment transfer: move $100 from src -> dst
@@ -259,12 +272,12 @@ func runPaymentTxn(c *Client, hosts []string, src, dst int) bool {
 	// X-lock both accounts up front (avoid upgrades)
 	sVal, ok := c.rpcGet(tx, fmt.Sprintf("%d", src), true, hosts)
 	if !ok {
-		c.Abort(nil, nil, tx)
+		c.DefinitelyAbort(nil, nil, tx)
 		return false
 	}
 	dVal, ok := c.rpcGet(tx, fmt.Sprintf("%d", dst), true, hosts)
 	if !ok {
-		c.Abort(nil, nil, tx)
+		c.DefinitelyAbort(nil, nil, tx)
 		return false
 	}
 
@@ -278,21 +291,21 @@ func runPaymentTxn(c *Client, hosts []string, src, dst int) bool {
 	}
 
 	if sBal < 100 {
-		c.Abort(nil, nil, tx)
+		c.DefinitelyAbort(nil, nil, tx)
 		return false
 	}
 
 	// write both sides
 	if !c.rpcPut(tx, fmt.Sprintf("%d", src), fmt.Sprintf("%d", sBal-100), hosts) {
-		c.Abort(nil, nil, tx)
+		c.DefinitelyAbort(nil, nil, tx)
 		return false
 	}
 	if !c.rpcPut(tx, fmt.Sprintf("%d", dst), fmt.Sprintf("%d", dBal+100), hosts) {
-		c.Abort(nil, nil, tx)
+		c.DefinitelyAbort(nil, nil, tx)
 		return false
 	}
 
-	c.Commit(nil, nil, tx)
+	c.TryCommit(nil, nil, tx)
 	return true
 }
 
@@ -303,7 +316,7 @@ func auditSumTxn(c *Client, hosts []string) (int, []int, bool) {
 	for i := 0; i < 10; i++ {
 		v, ok := c.rpcGet(tx, fmt.Sprintf("%d", i), false, hosts)
 		if !ok {
-			c.Abort(nil, nil, tx)
+			c.DefinitelyAbort(nil, nil, tx)
 			return 0, nil, false
 		}
 		b := 0
@@ -313,7 +326,7 @@ func auditSumTxn(c *Client, hosts []string) (int, []int, bool) {
 		balances[i] = b
 		total += b
 	}
-	c.Commit(nil, nil, tx)
+	c.TryCommit(nil, nil, tx)
 	return total, balances, true
 }
 

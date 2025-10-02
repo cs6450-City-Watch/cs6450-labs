@@ -225,7 +225,17 @@ func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 	return nil
 }
 
-func (kv *KVService) Commit(msg *kvs.PhaseTwoCommit, response *struct{}, lead bool) error {
+func (kv *KVService) CanCommit(txID *int64, response *bool) error {
+	// If transaction data is not present, return false.
+	// Kind of redundant after our checks during operations,
+	// but nice to have regardless.
+	// Gets around ugly situations with the `ok` check in `Commit` and `Abort`.
+	_, ok := kv.txs.data.Load(txID)
+	*response = ok
+	return nil
+}
+
+func (kv *KVService) Commit(msg *kvs.PhaseTwoCommit, response *struct{}) error {
 	if msg.Lead { // don't duplicate commit counts
 		kv.Lock()
 		kv.stats.commits++
@@ -270,7 +280,7 @@ func (kv *KVService) Commit(msg *kvs.PhaseTwoCommit, response *struct{}, lead bo
 	return nil
 }
 
-func (kv *KVService) Abort(msg *kvs.PhaseTwoCommit, response *struct{}, lead bool) error {
+func (kv *KVService) Abort(msg *kvs.PhaseTwoCommit, response *struct{}) error {
 	if msg.Lead { // don't duplicate abort counts
 		kv.Lock()
 		kv.stats.aborts++
