@@ -210,9 +210,9 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 	return value, true
 }
 
-func (kv *KVService) Begin(txID *int64, response *struct{}) error {
+func (kv *KVService) Begin(msg *kvs.PhaseTwoCommit, response *struct{}) error {
 	// Check if transaction already exists
-	if _, exists := kv.txs.data.Load(*txID); exists {
+	if _, exists := kv.txs.data.Load(msg.TransactionID); exists {
 		return nil // already active
 	}
 
@@ -221,7 +221,7 @@ func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 		writeAheadMap: make(map[string]string),
 		lockedKeys:    make(map[string]LockKind),
 	}
-	kv.txs.data.Store(*txID, tx)
+	kv.txs.data.Store(msg.TransactionID, tx)
 	return nil
 }
 

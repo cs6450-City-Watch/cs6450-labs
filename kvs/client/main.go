@@ -27,7 +27,7 @@ func (c *Client) nextTxID() int64 {
 	return int64(id)
 }
 
-// helper to broadcast a method call to all hosts. This is used for Commit and Abort.
+// helper to broadcast a method call to all hosts. This is used for Commit and Abort AND Begin.
 func (c *Client) broadcastMethod(method string, txID int64) {
 	lead := true // should do in all cases for Commit and Abort, ensures counted only once
 	for _, host := range c.hosts {
