@@ -201,14 +201,6 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 	case ReadLock:
 		// fmt.Println("UPGRADE ATTEMPT ABORTED")
 		return "abort because of no wait deadlock - can't upgrade read lock on write, key: " + key, false // abort: key is already locked
-		// // TODO: Ask is this technically bad 2pl since can't automatically upgrade go locks?
-		// // should i just abort and not upgrade?
-		// e.RUnlock()
-		// // no wait deadlock prevention
-		// if !e.TryLock() {
-		// 	return "abort because of no wait deadlock", false // abort: key is already locked
-		// }
-		// tx.lockedKeys[key] = WriteLock
 	case WriteLock:
 		// already exclusive
 	}
@@ -221,7 +213,6 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 	// Check if transaction already exists
 	if _, exists := kv.txs.data.Load(*txID); exists {
-		// TODO: should panic rather than return
 		return nil // already active
 	}
 
@@ -234,15 +225,18 @@ func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 	return nil
 }
 
-func (kv *KVService) Commit(txID *int64, response *struct{}) error {
-	kv.Lock()
-	kv.stats.commits++
-	kv.Unlock()
+func (kv *KVService) Commit(msg *kvs.PhaseTwoCommit, response *struct{}, lead bool) error {
+	if msg.Lead { // don't duplicate commit counts
+		kv.Lock()
+		kv.stats.commits++
+		kv.Unlock()
+	}
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(*txID)
+	v, ok := kv.txs.data.Load(msg.TransactionID)
 	if !ok {
-		// TODO: should panic rather than return as committing a non-existent tx
+		// at this point if something fails it's golang's own damn fault
+		fmt.Printf("\n\n(!) SOMETHING WEIRD HAPPENED, TELL ASH\n\n")
 		return nil
 	}
 	tx := v.(*TxState)
@@ -272,19 +266,22 @@ func (kv *KVService) Commit(txID *int64, response *struct{}) error {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(*txID)
+	kv.txs.data.Delete(msg.TransactionID)
 	return nil
 }
 
-func (kv *KVService) Abort(txID *int64, response *struct{}) error {
-	kv.Lock()
-	kv.stats.aborts++
-	kv.Unlock()
+func (kv *KVService) Abort(msg *kvs.PhaseTwoCommit, response *struct{}, lead bool) error {
+	if msg.Lead { // don't duplicate abort counts
+		kv.Lock()
+		kv.stats.aborts++
+		kv.Unlock()
+	}
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(*txID)
+	v, ok := kv.txs.data.Load(msg.TransactionID)
 	if !ok {
-		// TODO: should panic as aborting a non-existent tx
+		// at this point if something fails it's golang's own damn fault
+		fmt.Printf("\n\n(!) SOMETHING WEIRD HAPPENED, TELL ASH\n\n")
 		return nil
 	}
 	tx := v.(*TxState)
@@ -304,7 +301,7 @@ func (kv *KVService) Abort(txID *int64, response *struct{}) error {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(*txID)
+	kv.txs.data.Delete(msg.TransactionID)
 	return nil
 }
 

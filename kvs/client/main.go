@@ -29,10 +29,14 @@ func (c *Client) nextTxID() int64 {
 
 // helper to broadcast a method call to all hosts. This is used for Commit and Abort.
 func (c *Client) broadcastMethod(method string, txID int64) {
+	lead := true // should do in all cases for Commit and Abort, ensures counted only once
 	for _, host := range c.hosts {
 		// use dummy reply struct
-		if err := host.Call("KVService."+method, &txID, &struct{}{}); err != nil {
+		msg := kvs.PhaseTwoCommit{txID, lead}
+		if err := host.Call("KVService."+method, &msg, &struct{}{}); err != nil {
 			log.Fatal("RPC call failed:", err)
+		} else {  // should only consider counted in case of no failure
+			lead = false
 		}
 	}
 }
@@ -140,7 +144,6 @@ func runConnection(wg *sync.WaitGroup, hosts []string, done *atomic.Bool, worklo
 		clientID:  uint(clientID),
 		txCounter: 0,
 	}
-	// TODO: Generate client ID
 
 	participants := make([]*rpc.Client, len(hosts))
 	for i, host := range hosts {

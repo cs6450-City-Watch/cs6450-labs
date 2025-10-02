@@ -19,3 +19,8 @@ type Operation struct {
 	// default false
 	ForUpdate bool
 }
+
+type PhaseTwoCommit struct {
+	TransactionID int64
+	Lead          bool
+}
