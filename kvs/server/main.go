@@ -218,9 +218,9 @@ func (kv *KVService) Put(txID int64, key, value string) (string, bool) {
 	return value, true
 }
 
-func (kv *KVService) Begin(txID *int64, response *struct{}) error {
+func (kv *KVService) Begin(msg *kvs.BroadcastMetaIdentifier, response *struct{}) error {
 	// Check if transaction already exists
-	if _, exists := kv.txs.data.Load(*txID); exists {
+	if _, exists := kv.txs.data.Load(msg.TransactionID); exists {
 		// TODO: should panic rather than return
 		return nil // already active
 	}
@@ -230,17 +230,19 @@ func (kv *KVService) Begin(txID *int64, response *struct{}) error {
 		writeAheadMap: make(map[string]string),
 		lockedKeys:    make(map[string]LockKind),
 	}
-	kv.txs.data.Store(*txID, tx)
+	kv.txs.data.Store(msg.TransactionID, tx)
 	return nil
 }
 
-func (kv *KVService) Commit(txID *int64, response *struct{}) error {
+func (kv *KVService) Commit(msg *kvs.BroadcastMetaIdentifier, response *struct{}) error {
 	kv.Lock()
-	kv.stats.commits++
+	if msg.Lead {
+		kv.stats.commits++
+	}
 	kv.Unlock()
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(*txID)
+	v, ok := kv.txs.data.Load(msg.TransactionID)
 	if !ok {
 		// TODO: should panic rather than return as committing a non-existent tx
 		return nil
@@ -272,17 +274,19 @@ func (kv *KVService) Commit(txID *int64, response *struct{}) error {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(*txID)
+	kv.txs.data.Delete(msg.TransactionID)
 	return nil
 }
 
-func (kv *KVService) Abort(txID *int64, response *struct{}) error {
+func (kv *KVService) Abort(msg *kvs.BroadcastMetaIdentifier, response *struct{}) error {
 	kv.Lock()
-	kv.stats.aborts++
+	if msg.Lead {
+		kv.stats.aborts++
+	}
 	kv.Unlock()
 
 	// Load transaction
-	v, ok := kv.txs.data.Load(*txID)
+	v, ok := kv.txs.data.Load(msg.TransactionID)
 	if !ok {
 		// TODO: should panic as aborting a non-existent tx
 		return nil
@@ -304,7 +308,7 @@ func (kv *KVService) Abort(txID *int64, response *struct{}) error {
 	}
 
 	// Delete transaction
-	kv.txs.data.Delete(*txID)
+	kv.txs.data.Delete(msg.TransactionID)
 	return nil
 }
 

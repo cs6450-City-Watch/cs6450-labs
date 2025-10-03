@@ -19,3 +19,8 @@ type Operation struct {
 	// default false
 	ForUpdate bool
 }
+
+type BroadcastMetaIdentifier struct {
+	TransactionID int64
+	Lead          bool   // useful for counting commits and aborts
+}

@@ -27,12 +27,16 @@ func (c *Client) nextTxID() int64 {
 	return int64(id)
 }
 
-// helper to broadcast a method call to all hosts. This is used for Commit and Abort.
+// helper to broadcast a method call to all hosts. This is used for Commit, Abort, and Begin.
 func (c *Client) broadcastMethod(method string, txID int64) {
+	lead := true
 	for _, host := range c.hosts {
+		msg := kvs.BroadcastMetaIdentifier{txID, lead}
 		// use dummy reply struct
-		if err := host.Call("KVService."+method, &txID, &struct{}{}); err != nil {
+		if err := host.Call("KVService."+method, &msg, &struct{}{}); err != nil {
 			log.Fatal("RPC call failed:", err)
+		} else { // only consider counted on success
+			lead = false
 		}
 	}
 }
