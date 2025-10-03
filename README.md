@@ -62,11 +62,11 @@ The 2 clients and 2 servers behavior is similar, but reflects the lower commits 
 # Reproducibility
 Our experiments were done on 4 CloudLab m510 machines.
 
-run `./run-cluster.sh <server_count> <client_count> "-numshards <#>" "-connections <#>" "-payments <true/false>"`
+Run `./run-cluster.sh <server_count> <client_count> <server_flags> <client_flags>`, where `client_flags` can include `-connections <#>` and `-payments <true/false>`.
 
 For example:
 
-`./run-cluster.sh 1 1 "-connections 70 -payments true"`
+`./run-cluster.sh 1 1 "" "-connections 70 -payments true"`
 
 Runs the "payments" workload testing the correctness of our 2PC/2PL approach.
 
