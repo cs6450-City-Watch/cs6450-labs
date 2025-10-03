@@ -38,7 +38,28 @@ Having multiple servers/participants likely raises the overhead of commits and a
 The following is an image of contention affecting our algorithm.
 The 2 clients and 2 servers behavior is similar, but reflects the lower commits and aborts count.
 
-![image info](./commits-v-theta.png)
+![image info](./commits-vs-theta.png)
+
+## Payments workload results
+
+We tested our code for strict serializability using a "payments" workload. The goal is to have un-changing total balance across the transactions, which we achieved. Sample results from `./run-cluster.sh 1 1 "" "-connections 10 -payments true"` can be seen below:
+
+```
+hosts [node0:8080]
+theta 0.99
+workload YCSB-B
+secs 30
+connections 10
+...
+Payments: accounts initialized; starting transfers.
+Audit OK: total=10000 balances=[500 1500 1000 1000 1000 1000 1000 1000 1000 1000]
+...
+Audit OK: total=10000 balances=[500 700 2400 0 1800 900 1700 100 1700 200]
+...
+Audit OK: total=10000 balances=[700 1800 800 800 500 2300 0 500 800 1800]
+...
+Audit OK: total=10000 balances=[2800 2000 0 0 100 2600 1100 200 0 1200]
+```
 
 # Design
 
@@ -66,7 +87,7 @@ Run `./run-cluster.sh <server_count> <client_count> <server_flags> <client_flags
 
 For example:
 
-`./run-cluster.sh 1 1 "" "-connections 70 -payments true"`
+`./run-cluster.sh 1 1 "" "-connections 10 -payments true"`
 
 Runs the "payments" workload testing the correctness of our 2PC/2PL approach.
 
@@ -80,7 +101,7 @@ When attempting to achieve higher performance via client-side multithreading, ad
 
 Individual contributions from each team member:
 
-- Artem: Initial "start" for serializable single server
+- Artem: Initial "start" for serializable single server, bugfixing
 - Ash: 2PC (initial ideas, can see in branch `pa2-2pc`), debugging, removed count duplication, throughput analysis
 - Brendon: Client interaction code, 2PL, 2PC
 - Cayden: N/A (life happens)
