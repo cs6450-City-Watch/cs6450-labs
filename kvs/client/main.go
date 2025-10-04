@@ -27,12 +27,16 @@ func (c *Client) nextTxID() int64 {
 	return int64(id)
 }
 
-// helper to broadcast a method call to all hosts. This is used for Commit and Abort.
+// helper to broadcast a method call to all hosts. This is used for Commit, Abort, and Begin.
 func (c *Client) broadcastMethod(method string, txID int64) {
+	lead := true
 	for _, host := range c.hosts {
+		msg := kvs.BroadcastMetaIdentifier{txID, lead}
 		// use dummy reply struct
-		if err := host.Call("KVService."+method, &txID, &struct{}{}); err != nil {
+		if err := host.Call("KVService."+method, &msg, &struct{}{}); err != nil {
 			log.Fatal("RPC call failed:", err)
+		} else { // only consider counted on success
+			lead = false
 		}
 	}
 }
@@ -316,7 +320,7 @@ func auditSumTxn(c *Client, hosts []string) (int, []int, bool) {
 
 // -------------- End of Code for Testing ---------------
 
-func runClient(id int, hosts []string, done *atomic.Bool, workload *kvs.Workload, numConnections int, resultsCh chan<- uint64, payments bool) {
+func runClient(machineId int, hosts []string, done *atomic.Bool, workload *kvs.Workload, numConnections int, resultsCh chan<- uint64, payments bool) {
 	var wg sync.WaitGroup
 	totalOpsCompleted := uint64(0)
 
@@ -326,12 +330,14 @@ func runClient(id int, hosts []string, done *atomic.Bool, workload *kvs.Workload
 		wg.Add(1)
 	}
 	for connId := 0; connId < numConnections; connId++ {
-		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted, connId, payments, &ready)
+		trueID := (machineId << 12) | connId
+
+		go runConnection(&wg, hosts, done, workload, &totalOpsCompleted, trueID, payments, &ready)
 	}
 
 	fmt.Println("waiting for connections to finish")
 	wg.Wait()
-	fmt.Printf("Client %d finished operations.\n", id)
+	fmt.Printf("Client %d finished operations.\n", machineId)
 	resultsCh <- totalOpsCompleted
 }
 
@@ -356,6 +362,8 @@ func main() {
 	numConnections := flag.Int("connections", 1, "Number of connections per client")
 	payments := flag.Bool("payments", false, "Run payment workload test (10 accounts)")
 
+	clID := flag.Int("clientID", 0, "ID of the current client machine")
+
 	flag.Parse()
 
 	if len(hosts) == 0 {
@@ -376,11 +384,12 @@ func main() {
 	done := atomic.Bool{}
 	resultsCh := make(chan uint64)
 
-	clientId := 0
-	go func(clientId int) {
+	// ID generated in command line args
+	machineID := *clID
+	go func(machineID int) {
 		workload := kvs.NewWorkload(*workload, *theta)
-		runClient(clientId, hosts, &done, workload, *numConnections, resultsCh, *payments)
-	}(clientId)
+		runClient(machineID, hosts, &done, workload, *numConnections, resultsCh, *payments)
+	}(machineID)
 
 	time.Sleep(time.Duration(*secs) * time.Second)
 	done.Store(true)
