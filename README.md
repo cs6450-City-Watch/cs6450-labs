@@ -80,6 +80,28 @@ Audit OK: total=10000 balances=[2800 2000 0 0 100 2600 1100 200 0 1200]
 - Less failed, but rejected: 2PC with an explicit prepare/voting stage
 - Currently involved: broadcasting commit or abort messages to every server may increase overhead
 
+## On Serializability
+
+For a kind of pseudo-proof, consider the fact that serializable systems
+are such that the precedence graphs of possible transaction schedules are acyclic.
+That is to say that when considering transactions `T1` and `T2`,
+it should never be the case that `T1` touches an element `A`, then `T2` touches it,
+and `T1` touches it again in an interleaved schedule.
+
+Without loss of generality consider a single server participant
+executing `T1` and `T2` (which, again, both "touch" `A`).
+If `T1` has factually touched `A`, with its associated lock free for pick up,
+it logically "picks up" the lock for `A`. This is apparent in both the server's
+`Put` and `Get` methods.
+Then, when `T2` tries to touch `A`,
+it is either the case that `T1` still has the lock and `T2` aborts,
+or `T1` has finished and the lock is available for `T2` to pick up- indicating that `T1` has finished.
+This former behavior is due to our 2PL implementation, and the latter
+as part of our 2PC implementation.
+
+So, we can see that the scheduling of `T1` and `T2` cannot have cyclic precedence graphs,
+and our system is serializable.
+
 # Reproducibility
 Our experiments were done on 4 CloudLab m510 machines.
 
